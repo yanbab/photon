@@ -19,7 +19,8 @@
   },
   "scripts": {
     "start": "electron dist/template-app",
-    "build": "grunt"
+    "build": "grunt",
+    "build:docs": "node scripts/compile-docs.js"
   },
   "license": "MIT",
   "devDependencies": {
