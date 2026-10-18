@@ -17,7 +17,7 @@ const siteMeta = {
   url: 'http://photonkit.com'
 };
 
-function copyDirRecursive(src, dest) {
+function copyDirRecursive(src, dest, filterFn) {
   if (!fs.existsSync(dest)) {
     fs.mkdirSync(dest, { recursive: true });
   }
@@ -26,9 +26,13 @@ function copyDirRecursive(src, dest) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
     if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
+      copyDirRecursive(srcPath, destPath, filterFn);
     } else {
-      fs.copyFileSync(srcPath, destPath);
+      if (filterFn) {
+        filterFn(srcPath, destPath);
+      } else {
+        fs.copyFileSync(srcPath, destPath);
+      }
     }
   }
 }
@@ -66,14 +70,12 @@ function highlightHtml(code) {
     }
 
     // Tokenize tags and attributes
-    // Match tags: (<\/?[a-zA-Z0-9\-]+)(.*?)(\/?>)
     let processed = line
       .replace(/&/g, '&amp;')
       .replace(/(<\/?[a-zA-Z0-9\-]+)(.*?)(\/?>)/g, (match, openTag, attrs, closeTag) => {
         const safeOpen = openTag.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const safeClose = closeTag.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         
-        // Highlight attributes inside tag
         let highlightedAttrs = attrs;
         if (attrs) {
           highlightedAttrs = attrs.replace(/([a-zA-Z0-9\-:]+)(=)("[^"]*"|'[^']*'|[^\s>]+)/g, (m, attrName, eq, attrVal) => {
@@ -89,7 +91,7 @@ function highlightHtml(code) {
   return `<div class="highlight"><pre><code class="language-html" data-lang="html">${highlightedLines.join('\n')}</code></pre></div>`;
 }
 
-function processContent(content, pageMeta, includes) {
+function processContent(content, pageMeta, includes, basePath) {
   // Replace {% highlight html %} ... {% endhighlight %}
   let result = content.replace(/{%\s*highlight\s+(\w+)\s*%}([\s\S]*?){%\s*endhighlight\s*%}/g, (match, lang, code) => {
     return highlightHtml(code.trim());
@@ -113,6 +115,26 @@ function processContent(content, pageMeta, includes) {
   result = result.replace(/{{\s*site\.description\s*}}/g, siteMeta.description);
   result = result.replace(/{{\s*site\.authors\s*}}/g, siteMeta.authors);
   result = result.replace(/{{\s*site\.url\s*}}/g, siteMeta.url);
+
+  // Convert root-absolute URLs to relative URLs using basePath
+  // href="/components" -> href="${basePath}components/"
+  result = result.replace(/href="\/components\/?/g, `href="${basePath}components/`);
+  // href="/getting-started" -> href="${basePath}getting-started/"
+  result = result.replace(/href="\/getting-started\/?/g, `href="${basePath}getting-started/`);
+  // href="/" -> href="${basePath}"
+  result = result.replace(/href="\/"/g, `href="${basePath}"`);
+  // href="/assets/ -> href="${basePath}assets/
+  result = result.replace(/href="\/assets\//g, `href="${basePath}assets/`);
+  // src="/assets/ -> src="${basePath}assets/
+  result = result.replace(/src="\/assets\//g, `src="${basePath}assets/`);
+  // src="/demo-app.html" -> src="${basePath}demo-app.html"
+  result = result.replace(/src="\/demo-app\.html"/g, `src="${basePath}demo-app.html"`);
+  // src="/components/ -> src="${basePath}components/
+  result = result.replace(/src="\/components\//g, `src="${basePath}components/`);
+  // href="/dist/ -> href="${basePath}dist/
+  result = result.replace(/href="\/dist\//g, `href="${basePath}dist/`);
+  // src="/dist/ -> src="${basePath}dist/
+  result = result.replace(/src="\/dist\//g, `src="${basePath}dist/`);
 
   return result;
 }
@@ -162,24 +184,46 @@ function compileDocs() {
     includes[file] = fs.readFileSync(path.join(includesDir, file), 'utf8');
   }
 
-  // 1. Copy static assets
+  // 1. Copy static assets with path fixes
   console.log('Copying static assets (assets/, dist/, components/)...');
-  copyDirRecursive(path.join(DOCS_SRC_DIR, 'assets'), path.join(OUTPUT_DIR, 'assets'));
-  copyDirRecursive(path.join(DOCS_SRC_DIR, 'dist'), path.join(OUTPUT_DIR, 'dist'));
-  copyDirRecursive(path.join(DOCS_SRC_DIR, 'components'), path.join(OUTPUT_DIR, 'components'));
+  
+  // Copy assets/ (fix url(/...) in css files to relative paths)
+  copyDirRecursive(path.join(DOCS_SRC_DIR, 'assets'), path.join(OUTPUT_DIR, 'assets'), (src, dest) => {
+    if (src.endsWith('.css')) {
+      let content = fs.readFileSync(src, 'utf8');
+      content = content.replace(/url\(\/assets\/img\//g, 'url(../img/');
+      content = content.replace(/url\(\/dist\/fonts\//g, 'url(../../dist/fonts/');
+      fs.writeFileSync(dest, content, 'utf8');
+    } else {
+      fs.copyFileSync(src, dest);
+    }
+  });
 
-  // Copy root static files
+  // Copy dist/
+  copyDirRecursive(path.join(DOCS_SRC_DIR, 'dist'), path.join(OUTPUT_DIR, 'dist'));
+
+  // Copy components/ preview HTML files (fix /dist/css/photon.css -> ../dist/css/photon.css)
+  copyDirRecursive(path.join(DOCS_SRC_DIR, 'components'), path.join(OUTPUT_DIR, 'components'), (src, dest) => {
+    if (src.endsWith('.html')) {
+      let content = fs.readFileSync(src, 'utf8');
+      content = content.replace(/href="\/dist\/css\/photon\.css"/g, 'href="../dist/css/photon.css"');
+      fs.writeFileSync(dest, content, 'utf8');
+    } else {
+      fs.copyFileSync(src, dest);
+    }
+  });
+
+  // Copy root demo-app.html (fix /dist/css/photon.css -> dist/css/photon.css)
   const demoAppSrc = path.join(DOCS_SRC_DIR, 'demo-app.html');
   if (fs.existsSync(demoAppSrc)) {
-    fs.copyFileSync(demoAppSrc, path.join(OUTPUT_DIR, 'demo-app.html'));
+    let content = fs.readFileSync(demoAppSrc, 'utf8');
+    content = content.replace(/href="\/dist\/css\/photon\.css"/g, 'href="dist/css/photon.css"');
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'demo-app.html'), content, 'utf8');
   }
+
   const licenseSrc = path.join(DOCS_SRC_DIR, 'LICENSE');
   if (fs.existsSync(licenseSrc)) {
     fs.copyFileSync(licenseSrc, path.join(OUTPUT_DIR, 'LICENSE'));
-  }
-  const cnameSrc = path.join(ROOT_DIR, 'CNAME');
-  if (fs.existsSync(cnameSrc)) {
-    fs.copyFileSync(cnameSrc, path.join(OUTPUT_DIR, 'CNAME'));
   }
 
   // Add .nojekyll for GitHub Pages
@@ -187,9 +231,9 @@ function compileDocs() {
 
   // 2. Render templates
   const pagesToRender = [
-    { file: 'index.html', permalink: 'index.html' },
-    { file: 'getting-started.html', permalink: 'getting-started' },
-    { file: 'components.html', permalink: 'components' }
+    { file: 'index.html', permalink: 'index.html', basePath: './' },
+    { file: 'getting-started.html', permalink: 'getting-started', basePath: '../' },
+    { file: 'components.html', permalink: 'components', basePath: '../' }
   ];
 
   for (const page of pagesToRender) {
@@ -198,28 +242,33 @@ function compileDocs() {
     const { meta, body } = parseFrontMatter(rawContent);
 
     // Process page body
-    const processedBody = processContent(body, meta, includes);
+    const processedBody = processContent(body, meta, includes, page.basePath);
 
     // Wrap in layout if specified
     let finalHtml = processedBody;
     if (meta.layout === 'default') {
       finalHtml = defaultLayout.replace('{{ content }}', processedBody);
       // Process layout includes and variables
-      finalHtml = processContent(finalHtml, meta, includes);
+      finalHtml = processContent(finalHtml, meta, includes, page.basePath);
     }
 
     if (page.permalink === 'index.html') {
       fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), finalHtml, 'utf8');
-      console.log(`Rendered ${path.basename(OUTPUT_DIR)}/index.html`);
+      console.log(`Rendered ${path.basename(OUTPUT_DIR)}/index.html (basePath: ${page.basePath})`);
     } else {
-      // Pretty permalinks: e.g. docs/components/index.html
+      // Pretty permalinks: e.g. docs/components/index.html (depth 1, basePath: ../)
       const dirPath = path.join(OUTPUT_DIR, page.permalink);
       if (!fs.existsSync(dirPath)) {
         fs.mkdirSync(dirPath, { recursive: true });
       }
       fs.writeFileSync(path.join(dirPath, 'index.html'), finalHtml, 'utf8');
-      // Also provide the .html file at root (e.g. docs/components.html) for compatibility
-      fs.writeFileSync(path.join(OUTPUT_DIR, `${page.permalink}.html`), finalHtml, 'utf8');
+
+      // Also render root-level .html file with basePath: ./ for root-level access (e.g. docs/components.html)
+      const rootBody = processContent(body, meta, includes, './');
+      let rootHtml = defaultLayout.replace('{{ content }}', rootBody);
+      rootHtml = processContent(rootHtml, meta, includes, './');
+      fs.writeFileSync(path.join(OUTPUT_DIR, `${page.permalink}.html`), rootHtml, 'utf8');
+
       console.log(`Rendered ${path.basename(OUTPUT_DIR)}/${page.permalink}/index.html and ${path.basename(OUTPUT_DIR)}/${page.permalink}.html`);
     }
   }
